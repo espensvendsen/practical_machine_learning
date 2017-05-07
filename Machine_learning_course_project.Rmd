@@ -1,0 +1,150 @@
+---
+title: "Machine Learning Course project: Predicting quality of weight lifting"
+author: "Espen Svendsen"
+date: "29 4 2017"
+output: html_document
+---
+
+# Summmary
+This course project uses HAR data from Groupware\@LES available at [Human Activity Recognition](http://groupware.les.inf.puc-rio.br/har). These data are collected from accelerometers on the belt, forearm,  arm and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways:
+
+* Class A: Exactly according to the specification
+* Class B: Throwing the elbows to the front
+* Class C: Lifting the dumbbell only halfway
+* Class D: Lowering the dumbbell only halfway
+* Class E. Throwing the hips to the front
+
+By applying various machine learning algorithms and parameters on this data set, the conclusion is that Random Forest yielded the best predictions of the attempted algorithms. The prediction accuracy exceeded 99% for out-of-sample data.
+
+
+# Pre-processing
+The data is downloaded prior to pre-processing.
+
+```{r initial_setup, echo=FALSE}
+# Load required libraries
+library(caret) 
+library(doParallel)
+
+
+# Download and read files
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv","./data/training.csv", method="curl")
+dataSet <- read.csv("./data/training.csv")
+
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv","./data/testing.csv", method="curl")
+quiz <- read.csv("./data/testing.csv")
+```
+
+Dimensions of full data set and quiz set are:
+```{r dimensions, echo=TRUE}
+dim(dataSet)
+dim(quiz)
+```
+The "quiz" set ("testing.csv") is not intended for testing as we normally define this term in machine learning. Rather, we use the full "dataSet" to split into a training and a testing set. The size of the dataset is fairly large, so we set the training set to 3/4 of the total.
+
+```{r splitting}
+set.seed(1)
+inTrain = createDataPartition(dataSet$classe, p = 3/4)[[1]]
+training = dataSet[ inTrain,]
+testing = dataSet[-inTrain,]
+rm(dataSet) # not required anymore, may be freed from memory
+```
+
+### Data cleansing
+The data cleansing assessments are described in-line in the following code section.
+```{r cleansing}
+# Removing subject and time/windowing
+# These are variables that will not occur in new observations, hence they will lead to overfitting if included.
+training <- training[,-c(1:7)]
+testing <- testing[,-c(1:7)]
+
+# Removing useless features
+sumNA <- sapply(training, function(x) sum(is.na(x)))
+# table(sumNA) 
+##  0 14408 
+## 86    67  => The 67 columns with high number of NAs may be removed
+training <- training[, sumNA == 0]
+testing <- testing[, sumNA == 0]
+
+# Removing constant features
+nzv <- nearZeroVar(training, saveMetrics = TRUE)
+training <- training[, !(nzv$zeroVar + nzv$nzv > 0)]
+testing <- testing[, !(nzv$zeroVar + nzv$nzv > 0)]
+
+```
+
+Some further cleansing steps were considered and disregarded:
+
+* As the outcome variable "classe" is a multiclass variable, linear models are normally not suited. Therefore, normalization is not attempted.
+* Highly correlated features might have been removed, but this is normally most important for linear models. Although not shown here, removing highly correlated features yielded a slightly WORSE performance.
+
+## Model building
+Several models has been attempted, and the final model build by a Random Forest algorithm is shown here. The model has been built with cross-validation to minimize model bias.
+
+```{r model_building, echo=FALSE}
+# NOTE: This is CPU intensive and slow. Is run in a cluster to reduce execution time. Reducing number of K folds will reduce execution time.
+cl <- makeCluster(4)
+registerDoParallel(cl)
+
+# Run Random Forest to build a model
+set.seed(1)
+modelRF <- train(classe ~ ., data=training, method="rf", prox=TRUE, 
+                 trControl = trainControl(method = "cv", number = 4, allowParallel = TRUE))
+# Cluster teardown
+unregister <- function() {
+  env <- foreach:::.foreachGlobals
+  rm(list=ls(name=env), pos=env)
+}
+unregister()
+```
+
+The resulted model is:
+```{r model_result}
+modelRF
+```
+
+### Out-of-sample error
+
+The more realistic performance is gained by calculating the out-of-sample accuracy over testing set.
+
+```{r out_of_sample_error}
+predOutOfSampleRF <- predict(modelRF, newdata = testing, interval="prediction")
+confusion <- confusionMatrix(predOutOfSampleRF, testing$classe)
+errorOutOfSampleRF <- 1 - confusion$overall["Accuracy"]
+confusion
+```
+The accuracy on the testing set is `r confusion$overall[1]`, which is considered high. The error rate is `r errorOutOfSampleRF`. This indicates a model robust to out-of-sample data.
+
+### Visualization
+
+The resulted prediction results are visualized in a plotted confusion matrix.
+```{r visualization}
+# Data frames required for ggplot
+actualDF = as.data.frame(table(testing$classe))
+names(actualDF) = c("Actual","ActualFreq")
+
+predictedDF <- as.data.frame(table("Predicted"=predOutOfSampleRF, "Actual"=testing$classe))
+confusionDF = cbind(predictedDF, actualDF)
+confusionDF$Percent = confusionDF$Freq/confusionDF$ActualFreq*100
+
+# Tile plot
+tile <- ggplot() +
+  geom_tile(aes(x=Actual, y=Predicted,fill=Percent),data=confusionDF, 
+            color="black",size=0.1) +labs(x="Actual result", y="Predicted result (out-of-sample)")
+tile = tile + geom_text(aes(x=Actual,y=Predicted, 
+              label=sprintf("%.2f", Percent)), data=confusionDF, size=3, 
+              colour="black") + scale_fill_gradient(low="grey", high="green")
+tile = tile + geom_tile(aes(x=Actual, y=Predicted),
+              data=subset(confusionDF, as.character(Actual)==as.character(Predicted)), color="black",size=0.3, fill="black", alpha=0)
+tile
+```
+
+## Conclusion
+The low out-of-sample error indicates that the final model is a good fit. The Random Forest algorithm performed with a total accuracy of `r confusion$overall[1]`.
+
+
+## Epilogue: Prediction on quiz
+Finally the quiz data is predicted by means of the Random Forest model
+```{r quiz}
+quiz <- quiz[, c(names(training[, -ncol(training)]), "problem_id")]
+predict(modelRF, newdata=quiz)
+```
